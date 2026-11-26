@@ -28,10 +28,9 @@ final class Updater {
     static final int IDLE = 0, CHECKING = 1, UP_TO_DATE = 2, AVAILABLE = 3,
             DOWNLOADING = 4, INSTALLING = 5, FAILED = 6, NEEDS_PERMISSION = 7;
 
-    /** Newest releases first. The launcher's releases live in the same repo,
-     *  so we pick the newest "gallery-v…" one ourselves. */
+    /** Newest releases first, from the gallery's own repo (tags "v0.2.3"). */
     private static final String RELEASES =
-            "https://api.github.com/repos/adiirfan/launcher-rs/releases?per_page=30";
+            "https://api.github.com/repos/adiirfan/holo-gallery/releases?per_page=30";
     private static final String STATUS = "dev.launcherrs.gallery.INSTALL_STATUS";
     private static final int TIMEOUT_MS = 15000;
 
@@ -189,7 +188,7 @@ final class Updater {
         c.setConnectTimeout(TIMEOUT_MS);
         c.setReadTimeout(TIMEOUT_MS);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "launcher-rs-gallery-updater");
+        c.setRequestProperty("User-Agent", "holo-gallery-updater");
         return c;
     }
 
@@ -204,7 +203,7 @@ final class Updater {
 
     /** "gallery-v0.1.0" → "0.1.0"; anything else (a launcher release) → null. */
     static String galleryVersion(String tag) {
-        String v = tag.startsWith("gallery-v") ? tag.substring(9) : null;
+        String v = tag.startsWith("gallery-v") ? tag.substring(9) : tag.startsWith("v") ? tag.substring(1) : null;
         return v != null && !v.isEmpty() && Character.isDigit(v.charAt(0)) ? v : null;
     }
 
