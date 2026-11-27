@@ -19,6 +19,7 @@ pub mod motion;
 pub mod zoom;
 pub mod viewer_list;
 pub mod yuv;
+pub mod search;
 pub mod selection;
 pub mod settings;
 pub mod open_with;

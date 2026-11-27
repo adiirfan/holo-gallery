@@ -12,6 +12,17 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.provider.Settings;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.Selection;
+import android.text.SpannableStringBuilder;
+import android.view.KeyEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
 
 import java.util.ArrayList;
 
@@ -24,6 +35,9 @@ public class MainActivity extends NativeActivity {
     private ContentObserver observer;
     private Player player;
     private static final int ASK_ACCESS = 1;
+    /** Search: an invisible text box the keyboard types into; Rust draws it. */
+    private View input;
+    private final Editable text = new SpannableStringBuilder();
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -34,6 +48,7 @@ public class MainActivity extends NativeActivity {
                 android.graphics.Insets i = insets.getInsets(
                         android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
                 onInsets(i.top, i.bottom, i.left, i.right);
+                onKeyboard(insets.getInsets(android.view.WindowInsets.Type.ime()).bottom);
             } else {
                 onInsets(insets.getStableInsetTop(), insets.getStableInsetBottom(),
                         insets.getStableInsetLeft(), insets.getStableInsetRight());
@@ -41,6 +56,16 @@ public class MainActivity extends NativeActivity {
             return v.onApplyWindowInsets(insets);
         });
         reportAccess();
+        input = new View(this) {
+            @Override public boolean onCheckIsTextEditor() { return true; }
+            @Override public InputConnection onCreateInputConnection(EditorInfo info) {
+                info.inputType = InputType.TYPE_CLASS_TEXT;
+                info.imeOptions = EditorInfo.IME_ACTION_SEARCH | EditorInfo.IME_FLAG_NO_FULLSCREEN;
+                return new Bridge(this, text);
+            }
+        };
+        input.setFocusableInTouchMode(true);
+        addContentView(input, new ViewGroup.LayoutParams(1, 1));
         // Android 13+: Back (gesture or button) comes here instead of as a
         // key press; Rust decides what it closes. Without this, Android 16
         // closes the whole app on a back swipe.
@@ -295,6 +320,72 @@ public class MainActivity extends NativeActivity {
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request > 100 && request <= 105) onActionDone(request - 100, result == RESULT_OK);
+    }
+
+    /** Search: show or hide the keyboard. Called from Rust's thread. */
+    public void showKeyboard(boolean show) {
+        runOnUiThread(() -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (show) { input.requestFocus(); imm.showSoftInput(input, 0); }
+            else {
+                imm.hideSoftInputFromWindow(input.getWindowToken(), 0);
+                input.clearFocus();
+            }
+        });
+    }
+
+    /** Search: empty the text, and tell the keyboard to start over. */
+    public void clearText() {
+        runOnUiThread(() -> {
+            BaseInputConnection.removeComposingSpans(text);
+            text.clear();
+            Selection.setSelection(text, 0);
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).restartInput(input);
+            onText("", 0, 0, -1, -1);
+        });
+    }
+
+    static native void onText(String text, int selStart, int selEnd, int compStart, int compEnd);
+    static native void onSearchAction();
+    static native void onKeyboard(int bottom);
+
+    /** Hands the keyboard's edits to Rust as the whole text each time. */
+    private static final class Bridge extends BaseInputConnection {
+        private final Editable text;
+        Bridge(View v, Editable text) { super(v, true); this.text = text; }
+        @Override public Editable getEditable() { return text; }
+        private boolean push(boolean r) {
+            Editable e = getEditable();
+            onText(e.toString(), Selection.getSelectionStart(e), Selection.getSelectionEnd(e),
+                    getComposingSpanStart(e), getComposingSpanEnd(e));
+            return r;
+        }
+        @Override public boolean commitText(CharSequence t, int p) { return push(super.commitText(t, p)); }
+        @Override public boolean setComposingText(CharSequence t, int p) { return push(super.setComposingText(t, p)); }
+        @Override public boolean finishComposingText() { return push(super.finishComposingText()); }
+        @Override public boolean deleteSurroundingText(int b, int a) { return push(super.deleteSurroundingText(b, a)); }
+        @Override public boolean setSelection(int s, int e) { return push(super.setSelection(s, e)); }
+        @Override public boolean setComposingRegion(int s, int e) { return push(super.setComposingRegion(s, e)); }
+        @Override public boolean deleteSurroundingTextInCodePoints(int b, int a) {
+            return push(super.deleteSurroundingTextInCodePoints(b, a));
+        }
+        @Override public boolean endBatchEdit() { boolean more = super.endBatchEdit(); push(true); return more; }
+        @Override public boolean performEditorAction(int action) { onSearchAction(); return true; }
+        /** Some keyboards send keys instead of text: Backspace, Enter, plain letters. */
+        @Override public boolean sendKeyEvent(KeyEvent k) {
+            if (k.getAction() != KeyEvent.ACTION_DOWN) return true;
+            Editable e = getEditable();
+            int s = Selection.getSelectionStart(e), end = Selection.getSelectionEnd(e);
+            switch (k.getKeyCode()) {
+                case KeyEvent.KEYCODE_DEL:
+                    if (s != end) { e.delete(Math.min(s, end), Math.max(s, end)); return push(true); }
+                    return push(super.deleteSurroundingTextInCodePoints(1, 0));
+                case KeyEvent.KEYCODE_ENTER: onSearchAction(); return true;
+                default:
+                    int u = k.getUnicodeChar();
+                    return u == 0 || commitText(new String(Character.toChars(u)), 1);
+            }
+        }
     }
 
     static native void onActionDone(int kind, boolean ok);

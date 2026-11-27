@@ -17,6 +17,7 @@ mod viewer;
 mod viewer_jobs;
 mod chrome;
 mod input;
+mod keyboard;
 mod library;
 mod mover;
 mod open_with;
@@ -195,6 +196,19 @@ fn android_main(app: AndroidApp) {
             sched.request_redraw();
         }
         let input = input::drain(&app);
+        // Search: what's typed picks the results; the keyboard's Search key
+        // puts the keyboard away so the results can be seen.
+        if let Some(a) = album.as_mut().filter(|a| a.is_search()) {
+            if let Some(st) = keyboard::take() {
+                a.set_query(&st.text);
+                sched.request_redraw();
+            }
+            if keyboard::take_action() {
+                keyboard::show(&app, false);
+            }
+            let kb = keyboard::height();
+            a.set_typing(kb > 0.0, kb);
+        }
         if !input.touches.is_empty() {
             policy.note_activity(Instant::now());
             sched.request_redraw();
@@ -419,6 +433,9 @@ fn android_main(app: AndroidApp) {
                 Action::None => {}
                 Action::Open(i) => {
                     outside = false;
+                    if album.as_ref().is_some_and(|a| a.is_search()) {
+                        keyboard::show(&app, false);
+                    }
                     let grid = album.as_ref().unwrap_or(&photos);
                     viewer = Some(Viewer::open(&app, photos_density(&app), grid.items().clone(), grid.arranged().order.clone(), i as usize, screen_w));
                     viewer_source = ViewerSource::Grid;
@@ -457,8 +474,26 @@ fn android_main(app: AndroidApp) {
                 }
                 Action::Back => {
                     if let Some(a) = album.take() {
+                        if a.is_search() {
+                            keyboard::show(&app, false);
+                        }
                         photos.set_sort(a.sort, a.order);
                     }
+                }
+                Action::Search => {
+                    let mut grid = Photos::search(photos_density(&app));
+                    grid.set_items(photos.items().clone());
+                    grid.set_sort(photos.sort, photos.order);
+                    grid.set_cols(gs.cols);
+                    grid.set_hidden(gs.hidden.iter().copied().collect());
+                    album = Some(grid);
+                    keyboard::clear(&app);
+                    keyboard::show(&app, true);
+                }
+                Action::Type => keyboard::show(&app, true),
+                Action::ClearSearch => {
+                    keyboard::clear(&app);
+                    keyboard::show(&app, true);
                 }
                 Action::AskAccess => {
                     if library::can_ask(&app) {
@@ -568,6 +603,9 @@ fn android_main(app: AndroidApp) {
             } else if let Some(a) = album.as_mut() {
                 if !a.back() {
                     let a = album.take().unwrap();
+                    if a.is_search() {
+                        keyboard::show(&app, false);
+                    }
                     photos.set_sort(a.sort, a.order);
                 }
             } else if on_albums {

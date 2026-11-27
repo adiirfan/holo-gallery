@@ -25,6 +25,9 @@ pub enum Filter {
     Bucket(i64),
     Videos,
     Favourites,
+    /// Files whose name or folder holds every one of these words
+    /// (from `search::words`).
+    Search(Vec<String>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +84,7 @@ pub fn arrange(
         Filter::All => !hidden.contains(&m.bucket_id),
         Filter::Videos => m.kind == Kind::Video && !hidden.contains(&m.bucket_id),
         Filter::Favourites => m.favourite && !hidden.contains(&m.bucket_id),
+        Filter::Search(w) => !hidden.contains(&m.bucket_id) && crate::search::matches(&m.name, &m.folder, w),
     };
     let mut idx: Vec<u32> = (0..items.len() as u32).filter(|&i| keep(&items[i as usize])).collect();
 
@@ -330,5 +334,18 @@ mod tests {
             assert_eq!(a.order.len(), 20_000);
             assert!(ms < 30.0, "{key:?} took {ms:.1} ms");
         }
+    }
+
+    #[test]
+    fn search_keeps_matching_names_and_leaves_hidden_folders_out() {
+        let mut items = vec![item(1, "IMG_beach.jpg", 100, 100, 1.0, Kind::Image), item(2, "IMG_city.jpg", 200, 200, 1.0, Kind::Image), item(3, "beach_too.jpg", 300, 300, 1.0, Kind::Image)];
+        items[2].folder = "Secret".into();
+        items[2].bucket_id = 7;
+        let words = crate::search::words("Beach");
+        let shown = arrange(&items, SortKey::Taken, Order::Desc, &Filter::Search(words.clone()), TODAY, 0, &HashSet::new());
+        assert_eq!(shown.order.len(), 2);
+        let hidden: HashSet<i64> = [7].into();
+        let shown = arrange(&items, SortKey::Taken, Order::Desc, &Filter::Search(words), TODAY, 0, &hidden);
+        assert_eq!(shown.order, vec![0]);
     }
 }

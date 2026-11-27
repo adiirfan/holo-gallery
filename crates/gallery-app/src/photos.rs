@@ -53,6 +53,12 @@ pub enum Action {
     Convert,
     Move,
     Delete,
+    /// The magnifier in the main bar: open search.
+    Search,
+    /// Search: the text field was tapped (bring the keyboard back).
+    Type,
+    /// Search: the × was tapped.
+    ClearSearch,
 }
 
 /// The selection's bottom buttons, left to right.
@@ -79,6 +85,9 @@ enum Press {
     SelConvert,
     SelMove,
     SelDelete,
+    Search,
+    Field,
+    Clear,
 }
 
 struct Pinch {
@@ -133,6 +142,12 @@ pub struct Photos {
     long_press: Option<(Instant, f32, f32)>,
     /// A long press became a drag: it chooses the run from this position.
     drag_from: Option<usize>,
+    /// Search results: what was typed (the bar shows it instead of a title).
+    query: Option<String>,
+    /// The keyboard is open for the search field: show the cursor.
+    typing: bool,
+    /// How much of the screen's bottom the keyboard covers, in pixels.
+    keyboard_px: f32,
 }
 
 impl Photos {
@@ -168,7 +183,38 @@ impl Photos {
             selection: Selection::default(),
             long_press: None,
             drag_from: None,
+            query: None,
+            typing: false,
+            keyboard_px: 0.0,
         }
+    }
+
+    /// Search by name: an empty search, showing nothing until something is typed.
+    pub fn search(d: f32) -> Photos {
+        let mut p = Photos::new(d, Filter::Search(Vec::new()), Some(String::new()));
+        p.query = Some(String::new());
+        p.typing = true;
+        p
+    }
+
+    pub fn is_search(&self) -> bool {
+        self.query.is_some()
+    }
+
+    /// What's typed changed: show what matches, from the top.
+    pub fn set_query(&mut self, text: &str) {
+        if self.query.as_deref() == Some(text) {
+            return;
+        }
+        self.query = Some(text.to_string());
+        self.filter = Filter::Search(gallery_core::search::words(text));
+        self.dirty = true;
+        self.scroller.jump_to(0.0);
+    }
+
+    pub fn set_typing(&mut self, typing: bool, keyboard_px: f32) {
+        self.typing = typing;
+        self.keyboard_px = if typing { keyboard_px } else { 0.0 };
     }
 
     pub fn set_items(&mut self, items: Arc<Vec<MediaItem>>) {
@@ -255,7 +301,7 @@ impl Photos {
     }
 
     fn bottom(&self, f: &Frame) -> f32 {
-        f.h - f.ins.bottom - if self.selecting { SEL_BOTTOM_DP * self.d } else { 0.0 }
+        f.h - f.ins.bottom.max(self.keyboard_px) - if self.selecting { SEL_BOTTOM_DP * self.d } else { 0.0 }
     }
 
     fn view_h(&self, f: &Frame) -> f32 {
@@ -324,7 +370,12 @@ impl Photos {
             self.draw_no_access(gl, r, batch, &f, access, top);
         } else if self.arranged.order.is_empty() {
             let em = 17.0 * d;
-            let msg = if self.title.is_some() { "Nothing in this album" } else { "No photos or videos yet" };
+            let msg = match &self.query {
+                Some(q) if q.trim().is_empty() => "Type part of a name or folder",
+                Some(_) => "Nothing matches",
+                None if self.title.is_some() => "Nothing in this album",
+                None => "No photos or videos yet",
+            };
             let mw = r.measure(msg, em, f.w, Weight::Light);
             r.text(gl, batch, msg, (f.w - mw) / 2.0, top + 120.0 * d, em, f.w, Rgba::hex(TEXT_QUIET), Weight::Light);
         } else {
@@ -447,10 +498,21 @@ impl Photos {
             self.menu = Menu::None;
             return (moving, missing);
         }
+        if let Some(q) = self.query.clone() {
+            self.draw_search_bar(gl, r, batch, &f, &q);
+            self.menu = Menu::None;
+            return (moving, missing);
+        }
         match &self.title {
             None => {
                 chrome::action_bar(gl, r, batch, f.w, bar_top, "Gallery", d);
                 widgets::tabs(gl, r, batch, 0.0, bar_top + BAR_DP * d, f.w, ["PHOTOS", "ALBUMS"], 0, d);
+                // Search, just left of SORT.
+                let sx = self.search_x(&f, access);
+                if self.press == Some(Press::Search) {
+                    batch.rect(Rect::new(sx, bar_top, 48.0 * d, BAR_DP * d), Rgba::hex(holo::accent()).with_alpha(0.3), 0.0);
+                }
+                holo::magnifier(batch, sx + 24.0 * d, bar_top + BAR_DP * d / 2.0, d, Rgba::hex(WHITE));
             }
             Some(t) => {
                 let t = t.clone();
@@ -494,6 +556,48 @@ impl Photos {
             }
         }
         (moving, missing)
+    }
+
+    /// Where the magnifier's 48 dp button starts: just left of SORT, or of
+    /// the overflow when SORT isn't shown.
+    fn search_x(&self, f: &Frame, access: Access) -> f32 {
+        let d = self.d;
+        let right = if access == Access::Full { f.w - 48.0 * d - 140.0 * d } else { f.w - 48.0 * d };
+        right - 48.0 * d
+    }
+
+    /// Search: back, the text (or a hint) with the cursor, ×, and the
+    /// accent line under the field.
+    fn draw_search_bar(&self, gl: &Context, r: &mut Renderer, batch: &mut Batch, f: &Frame, q: &str) {
+        let d = self.d;
+        let top = f.ins.top;
+        let h = BAR_DP * d;
+        let accent = Rgba::hex(holo::accent());
+        chrome::back_bar(gl, r, batch, f.w, top, "", self.press == Some(Press::Back), d);
+        let cy = top + h / 2.0;
+        let (fx, fw) = (64.0 * d, f.w - 64.0 * d - 52.0 * d);
+        let em = 18.0 * d;
+        let baseline = cy + r.ascent(em) / 2.0 - 1.0 * d;
+        let typed_w = if q.is_empty() {
+            r.text(gl, batch, "Search names", fx, baseline, em, fw, Rgba::hex(holo::PLACEHOLDER), Weight::Light);
+            0.0
+        } else {
+            r.text(gl, batch, q, fx, baseline, em, fw, Rgba::hex(WHITE), Weight::Light)
+        };
+        if self.typing {
+            let ch = 22.0 * d;
+            batch.rect(Rect::new(fx + typed_w.min(fw) + 1.0 * d, cy - ch / 2.0, 2.0 * d, ch), accent, 0.0);
+        }
+        batch.rect(Rect::new(fx - 4.0 * d, cy + 16.0 * d, fw + 8.0 * d, 1.5 * d), accent, 0.0);
+        if !q.is_empty() {
+            let cx = f.w - 52.0 * d;
+            if self.press == Some(Press::Clear) {
+                batch.rect(Rect::new(cx, top, 52.0 * d, h), accent.with_alpha(0.3), 0.0);
+            }
+            let em = 24.0 * d;
+            let xw = r.measure("\u{00D7}", em, 52.0 * d, Weight::Light);
+            r.text(gl, batch, "\u{00D7}", cx + (52.0 * d - xw) / 2.0, cy + r.ascent(em) / 2.0 - 1.0 * d, em, 52.0 * d, Rgba::hex(WHITE), Weight::Light);
+        }
     }
 
     /// Selection mode, as the mockup: DONE, "3 selected", ALL; SHARE, DELETE.
@@ -614,9 +718,27 @@ impl Photos {
             }
             return None;
         }
+        if self.query.is_some() {
+            if y >= bar_top && y < bar_bottom {
+                return Some(if x < 60.0 * d {
+                    Press::Back
+                } else if x >= f.w - 52.0 * d && self.query.as_deref().is_some_and(|q| !q.is_empty()) {
+                    Press::Clear
+                } else {
+                    Press::Field
+                });
+            }
+            return None;
+        }
         if y >= bar_top && y < bar_bottom {
             if x >= f.w - 48.0 * d {
                 return Some(Press::Overflow);
+            }
+            if self.title.is_none() {
+                let sx = self.search_x(f, access);
+                if x >= sx && x < sx + 48.0 * d {
+                    return Some(Press::Search);
+                }
             }
             if access == Access::Full && x >= f.w - 48.0 * d - 140.0 * d {
                 return Some(Press::Spinner);
@@ -783,6 +905,9 @@ impl Photos {
             Press::Tab(1) => Action::Albums,
             Press::Tab(_) => Action::None,
             Press::Back => Action::Back,
+            Press::Search => Action::Search,
+            Press::Field => Action::Type,
+            Press::Clear => Action::ClearSearch,
             Press::Spinner => {
                 self.menu = if self.menu == Menu::Sort { Menu::None } else { Menu::Sort };
                 Action::None
